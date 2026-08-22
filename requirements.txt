@@ -2,3 +2,4 @@ akshare
 pandas
 openpyxl
 anthropic
+streamlit

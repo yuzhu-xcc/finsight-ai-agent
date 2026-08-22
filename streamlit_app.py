@@ -1,31 +1,22 @@
 """
-Week 3 升级版：get_stock_summary 不再只能查预设的5支股票了。
-逻辑：先查本地数据库（那5支，速度快），查不到就实时联网抓这支股票最近90天的数据。
-覆盖范围：任意A股（6位数字代码）+ 任意港股（4-5位数字代码）。
-美股（比如特斯拉）依然不支持——这是第3周就定好的范围决策：美股数据源不稳定，
-项目刻意聚焦A股+港股，贴合香港市场求职方向，这个边界是可以在面试时解释清楚的。
+FinSight 网页版 Agent（升级版）—— 支持任意A股/港股查询，不再局限于预设5支
+逻辑跟 agent.py 完全一样，只是套了一层网页界面。
 """
 import json
-import os
 import sqlite3
 from datetime import datetime, timedelta
 
 import akshare as ak
 import pandas as pd
+import streamlit as st
 from anthropic import Anthropic
 
 
-# ========== 工具函数 ==========
+# ========== 工具函数（跟 agent.py 完全一样）==========
 
 def get_stock_summary(ticker: str) -> dict:
-    """
-    查询某支股票的整体表现：期初价、期末价、总收益率、波动率。
-    先查本地数据库（已追踪的股票，速度快），
-    查不到的话就实时联网查询最近90天的数据（覆盖任意A股/港股）。
-    """
     ticker = ticker.strip()
 
-    # ---- 第一步：先查本地数据库 ----
     conn = sqlite3.connect("finance.db")
     df = pd.read_sql_query("SELECT * FROM stock_prices WHERE ticker = ?", conn, params=(ticker,))
     conn.close()
@@ -46,18 +37,15 @@ def get_stock_summary(ticker: str) -> dict:
             "volatility": round(float(df["daily_return_pct"].std()), 2),
         }
 
-    # ---- 第二步：数据库里没有，实时联网查询最近90天 ----
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=90)
 
         if ticker.isdigit() and len(ticker) == 6:
-            # A股6位代码：6开头是上海，0/3开头是深圳
             prefix = "sh" if ticker.startswith("6") else "sz"
             live_df = ak.stock_zh_a_daily(symbol=f"{prefix}{ticker}", adjust="")
             market = "A股"
         else:
-            # 港股：补齐成5位数字（比如"700"补成"00700"）
             hk_code = ticker.zfill(5)
             live_df = ak.stock_hk_daily(symbol=hk_code, adjust="")
             market = "港股"
@@ -89,7 +77,6 @@ def get_stock_summary(ticker: str) -> dict:
 
 
 def list_watchlist() -> list:
-    """列出本地长期追踪的股票代码、名称、市场（不代表能查询的全部范围，只是长期追踪的核心几支）。"""
     conn = sqlite3.connect("finance.db")
     df = pd.read_sql_query("SELECT DISTINCT ticker, name, market FROM stock_prices", conn)
     conn.close()
@@ -149,7 +136,6 @@ def ask_agent(client, messages):
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            print(f"  🔧 调用工具：{block.name}，参数：{block.input}")
             result = tool_functions[block.name](**block.input)
             tool_results.append({
                 "type": "tool_result",
@@ -160,19 +146,35 @@ def ask_agent(client, messages):
         messages.append({"role": "user", "content": tool_results})
 
 
-# ========== 主流程 ==========
+# ========== 网页界面 ==========
 
-client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-messages = []
+st.set_page_config(page_title="FinSight Agent", page_icon="📈")
+st.title("📈 FinSight — AI 金融数据分析 Agent")
+st.caption("任意A股/港股 · pandas 分析 · 基于 Claude function calling")
 
-print("FinSight Agent 已启动，输入你的问题（输入 exit 退出）\n")
+client = Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
 
-while True:
-    user_input = input("你：")
-    if user_input.strip().lower() in ("exit", "quit", "退出"):
-        print("再见！")
-        break
+if "api_messages" not in st.session_state:
+    st.session_state.api_messages = []
+if "display_messages" not in st.session_state:
+    st.session_state.display_messages = []
 
-    messages.append({"role": "user", "content": user_input})
-    answer = ask_agent(client, messages)
-    print(f"\nAgent：{answer}\n")
+for role, text in st.session_state.display_messages:
+    with st.chat_message(role):
+        st.markdown(text)
+
+user_input = st.chat_input("问问关于A股/港股的问题，比如“泡泡玛特这段时间表现怎么样”")
+
+if user_input:
+    st.session_state.display_messages.append(("user", user_input))
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    st.session_state.api_messages.append({"role": "user", "content": user_input})
+
+    with st.chat_message("assistant"):
+        with st.spinner("正在查询数据..."):
+            answer = ask_agent(client, st.session_state.api_messages)
+        st.markdown(answer)
+
+    st.session_state.display_messages.append(("assistant", answer))
