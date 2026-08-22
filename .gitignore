@@ -1,0 +1,13 @@
+# 虚拟环境 —— 每个人本地重新装就行，不用上传
+test_env/
+
+# 数据库和生成的报告 —— 这些是脚本跑出来的产物，不是源代码，不用上传
+finance.db
+weekly_report.xlsx
+
+# Python自动生成的缓存文件
+__pycache__/
+*.pyc
+
+# Mac系统自动生成的文件
+.DS_Store
