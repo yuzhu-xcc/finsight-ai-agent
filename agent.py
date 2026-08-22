@@ -1,9 +1,6 @@
 """
-Week 3 升级版：get_stock_summary 不再只能查预设的5支股票了。
-逻辑：先查本地数据库（那5支，速度快），查不到就实时联网抓这支股票最近90天的数据。
-覆盖范围：任意A股（6位数字代码）+ 任意港股（4-5位数字代码）。
-美股（比如特斯拉）依然不支持——这是第3周就定好的范围决策：美股数据源不稳定，
-项目刻意聚焦A股+港股，贴合香港市场求职方向，这个边界是可以在面试时解释清楚的。
+Week 3 修复版：本地数据库查询加上错误处理，数据库不存在/表不存在时
+优雅降级到实时联网查询，而不是让整个功能崩溃。
 """
 import json
 import os
@@ -15,20 +12,16 @@ import pandas as pd
 from anthropic import Anthropic
 
 
-# ========== 工具函数 ==========
-
 def get_stock_summary(ticker: str) -> dict:
-    """
-    查询某支股票的整体表现：期初价、期末价、总收益率、波动率。
-    先查本地数据库（已追踪的股票，速度快），
-    查不到的话就实时联网查询最近90天的数据（覆盖任意A股/港股）。
-    """
     ticker = ticker.strip()
 
-    # ---- 第一步：先查本地数据库 ----
-    conn = sqlite3.connect("finance.db")
-    df = pd.read_sql_query("SELECT * FROM stock_prices WHERE ticker = ?", conn, params=(ticker,))
-    conn.close()
+    df = pd.DataFrame()
+    try:
+        conn = sqlite3.connect("finance.db")
+        df = pd.read_sql_query("SELECT * FROM stock_prices WHERE ticker = ?", conn, params=(ticker,))
+        conn.close()
+    except Exception:
+        df = pd.DataFrame()
 
     if not df.empty:
         df = df.sort_values("date")
@@ -46,18 +39,15 @@ def get_stock_summary(ticker: str) -> dict:
             "volatility": round(float(df["daily_return_pct"].std()), 2),
         }
 
-    # ---- 第二步：数据库里没有，实时联网查询最近90天 ----
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=90)
 
         if ticker.isdigit() and len(ticker) == 6:
-            # A股6位代码：6开头是上海，0/3开头是深圳
             prefix = "sh" if ticker.startswith("6") else "sz"
             live_df = ak.stock_zh_a_daily(symbol=f"{prefix}{ticker}", adjust="")
             market = "A股"
         else:
-            # 港股：补齐成5位数字（比如"700"补成"00700"）
             hk_code = ticker.zfill(5)
             live_df = ak.stock_hk_daily(symbol=hk_code, adjust="")
             market = "港股"
@@ -89,11 +79,13 @@ def get_stock_summary(ticker: str) -> dict:
 
 
 def list_watchlist() -> list:
-    """列出本地长期追踪的股票代码、名称、市场（不代表能查询的全部范围，只是长期追踪的核心几支）。"""
-    conn = sqlite3.connect("finance.db")
-    df = pd.read_sql_query("SELECT DISTINCT ticker, name, market FROM stock_prices", conn)
-    conn.close()
-    return df.to_dict(orient="records")
+    try:
+        conn = sqlite3.connect("finance.db")
+        df = pd.read_sql_query("SELECT DISTINCT ticker, name, market FROM stock_prices", conn)
+        conn.close()
+        return df.to_dict(orient="records")
+    except Exception:
+        return []
 
 
 tool_functions = {
@@ -159,8 +151,6 @@ def ask_agent(client, messages):
 
         messages.append({"role": "user", "content": tool_results})
 
-
-# ========== 主流程 ==========
 
 client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 messages = []

@@ -1,6 +1,8 @@
 """
-FinSight 网页版 Agent（升级版）—— 支持任意A股/港股查询，不再局限于预设5支
-逻辑跟 agent.py 完全一样，只是套了一层网页界面。
+FinSight 网页版 Agent（修复版）
+修复：本地数据库查询之前没有错误处理，部署到没有finance.db的服务器上会直接崩溃。
+现在改成：本地查询失败（数据库不存在/表不存在）就当作"本地没有"，
+自动往下走实时联网查询这条路，不会导致整个功能瘫痪。
 """
 import json
 import sqlite3
@@ -12,14 +14,19 @@ import streamlit as st
 from anthropic import Anthropic
 
 
-# ========== 工具函数（跟 agent.py 完全一样）==========
-
 def get_stock_summary(ticker: str) -> dict:
     ticker = ticker.strip()
 
-    conn = sqlite3.connect("finance.db")
-    df = pd.read_sql_query("SELECT * FROM stock_prices WHERE ticker = ?", conn, params=(ticker,))
-    conn.close()
+    # ---- 第一步：先查本地数据库，但这次给它加上保护 ----
+    df = pd.DataFrame()
+    try:
+        conn = sqlite3.connect("finance.db")
+        df = pd.read_sql_query("SELECT * FROM stock_prices WHERE ticker = ?", conn, params=(ticker,))
+        conn.close()
+    except Exception:
+        # 数据库文件不存在，或者表不存在，都会走到这里——
+        # 不让程序崩溃，而是当作"本地没有这支股票的数据"，继续往下走实时查询
+        df = pd.DataFrame()
 
     if not df.empty:
         df = df.sort_values("date")
@@ -37,6 +44,7 @@ def get_stock_summary(ticker: str) -> dict:
             "volatility": round(float(df["daily_return_pct"].std()), 2),
         }
 
+    # ---- 第二步：本地没有，实时联网查询最近90天 ----
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=90)
@@ -77,10 +85,13 @@ def get_stock_summary(ticker: str) -> dict:
 
 
 def list_watchlist() -> list:
-    conn = sqlite3.connect("finance.db")
-    df = pd.read_sql_query("SELECT DISTINCT ticker, name, market FROM stock_prices", conn)
-    conn.close()
-    return df.to_dict(orient="records")
+    try:
+        conn = sqlite3.connect("finance.db")
+        df = pd.read_sql_query("SELECT DISTINCT ticker, name, market FROM stock_prices", conn)
+        conn.close()
+        return df.to_dict(orient="records")
+    except Exception:
+        return []  # 本地数据库不存在时返回空列表，而不是崩溃
 
 
 tool_functions = {
