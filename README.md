@@ -7,14 +7,14 @@ An end-to-end pipeline that fetches real stock market data (A-shares & Hong Kong
 - **Fetches real historical price data** for a watchlist of A-share and Hong Kong stocks via `akshare`, with automatic retry logic to handle upstream data source instability
 - **Analyzes performance** with `pandas` — daily returns, 5-day moving averages, total return, and volatility per stock
 - **Auto-generates a formatted Excel report** with conditional formatting (gains in green, losses in red) and price trend charts, using `openpyxl`
-- **Answers natural language questions about any A-share or Hong Kong stock** through an AI agent that uses Claude's function calling to decide what to query. It checks the local tracked-stock database first, and falls back to a live query for any other ticker — not limited to a fixed watchlist
+- **Answers natural language questions about any A-share or Hong Kong stock** through an AI agent that uses Claude's function calling. For every query, it always tries a live lookup first (so results are current, not a stale snapshot); if the live source fails, it falls back to a locally cached snapshot and clearly labels the result as such
 - **Available as a web app** (Streamlit) with a chat interface, in addition to the terminal version
 
 ## Why this design
 
 The project started with `yfinance`, which is unreliable from within China. After testing several `akshare` data sources, I found the Eastmoney-backed endpoints intermittently dropped connections, while Sina-backed endpoints were consistently stable — so the pipeline standardizes on Sina sources with a retry wrapper. The project scope is intentionally limited to A-shares and Hong Kong stocks (US data sources proved unreliable), which also aligns with the Hong Kong market focus of the roles I'm targeting.
 
-The agent's `get_stock_summary` tool uses a database-first, live-fallback strategy: instant results for the core tracked watchlist, live `akshare` queries for anything else, so the agent isn't limited to a fixed list of stocks.
+The agent's `get_stock_summary` tool is live-first with a local-cache fallback: every query attempts a fresh `akshare` lookup over a rolling 90-day window, so results reflect the current date rather than a fixed snapshot from whenever the database was last populated. Only if the live request fails does it fall back to the locally stored watchlist data (`fetch_data.py`), and the response is clearly marked as a cached fallback so the user knows the data may be stale.
 
 ## Tech stack
 
@@ -24,7 +24,7 @@ Python · pandas · SQLite · akshare · openpyxl · Claude API (function callin
 
 ```
 finsight-ai-agent/
-├── fetch_data.py       # Pull real price data into SQLite (finance.db)
+├── fetch_data.py       # Pull real price data into SQLite (finance.db) — used as a fallback cache
 ├── analyze.py          # Compute returns, volatility, moving averages
 ├── generate_report.py  # Auto-generate a formatted Excel report
 ├── agent.py             # Terminal AI agent (Claude function calling)
@@ -38,19 +38,16 @@ finsight-ai-agent/
    ```
    pip install -r requirements.txt
    ```
-2. Fetch data and build the database:
+2. Build the local fallback cache (optional but recommended):
    ```
    python3 fetch_data.py
    ```
-3. Run the analysis:
+3. Run the analysis / Excel report on the cached watchlist:
    ```
    python3 analyze.py
-   ```
-4. Generate the Excel report:
-   ```
    python3 generate_report.py
    ```
-5. Chat with the agent in the terminal:
+4. Chat with the agent in the terminal:
    ```
    export ANTHROPIC_API_KEY="your-key-here"
    python3 agent.py
@@ -64,14 +61,14 @@ finsight-ai-agent/
 ## Example
 
 ```
-You: How has Pop Mart performed recently?
-Agent: Pop Mart (09992, HK) — live query, last 90 days:
-       Start: 245.60 → End: 268.40, total return +9.28%,
-       volatility 3.1%...
+You: How has Tencent performed recently?
+Agent: Tencent Holdings (00700, HK) — live query, last 90 days:
+       Start: 452.00 → End: 421.20, total return -6.81%,
+       volatility 2.24%...
 ```
 
 ## Future improvements
 
+- Schedule `fetch_data.py` to run automatically (e.g. daily) so the fallback cache doesn't go stale
 - Add more tools to the agent (e.g. multi-stock comparison, custom date ranges)
-- Cache live-fetched data so repeated queries don't re-hit the API
 - Add unit tests for the data pipeline and agent tools

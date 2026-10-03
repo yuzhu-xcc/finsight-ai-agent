@@ -1,8 +1,6 @@
 """
-FinSight 网页版 Agent（修复版）
-修复：本地数据库查询之前没有错误处理，部署到没有finance.db的服务器上会直接崩溃。
-现在改成：本地查询失败（数据库不存在/表不存在）就当作"本地没有"，
-自动往下走实时联网查询这条路，不会导致整个功能瘫痪。
+FinSight 网页版 Agent —— 实时优先版
+所有股票统一先实时联网查询最近90天数据，联网失败才退回本地缓存旧数据兜底。
 """
 import json
 import sqlite3
@@ -14,74 +12,78 @@ import streamlit as st
 from anthropic import Anthropic
 
 
-def get_stock_summary(ticker: str) -> dict:
-    ticker = ticker.strip()
+def _fetch_live(ticker: str):
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=90)
 
-    # ---- 第一步：先查本地数据库，但这次给它加上保护 ----
-    df = pd.DataFrame()
+    if ticker.isdigit() and len(ticker) == 6:
+        prefix = "sh" if ticker.startswith("6") else "sz"
+        df = ak.stock_zh_a_daily(symbol=f"{prefix}{ticker}", adjust="")
+        df = df.reset_index()
+        market = "A股"
+    else:
+        hk_code = ticker.zfill(5)
+        df = ak.stock_hk_daily(symbol=hk_code, adjust="")
+        market = "港股"
+
+    df["date"] = df["date"].astype(str)
+    df = df[(df["date"] >= start_date.strftime("%Y-%m-%d")) & (df["date"] <= end_date.strftime("%Y-%m-%d"))]
+
+    if df.empty:
+        raise ValueError(f"没有找到股票代码 {ticker} 最近90天的数据")
+
+    df["daily_return_pct"] = df["close"].pct_change() * 100
+    start_price = df["close"].iloc[0]
+    end_price = df["close"].iloc[-1]
+
+    return {
+        "ticker": ticker,
+        "market": market,
+        "source": "实时查询（最近90天）",
+        "start_price": round(float(start_price), 2),
+        "end_price": round(float(end_price), 2),
+        "total_return_pct": round(float((end_price - start_price) / start_price * 100), 2),
+        "volatility": round(float(df["daily_return_pct"].std()), 2),
+    }
+
+
+def _fetch_from_local_db(ticker: str):
     try:
         conn = sqlite3.connect("finance.db")
         df = pd.read_sql_query("SELECT * FROM stock_prices WHERE ticker = ?", conn, params=(ticker,))
         conn.close()
     except Exception:
-        # 数据库文件不存在，或者表不存在，都会走到这里——
-        # 不让程序崩溃，而是当作"本地没有这支股票的数据"，继续往下走实时查询
-        df = pd.DataFrame()
+        return None
 
-    if not df.empty:
-        df = df.sort_values("date")
-        df["daily_return_pct"] = df["close"].pct_change() * 100
-        start_price = df["close"].iloc[0]
-        end_price = df["close"].iloc[-1]
-        return {
-            "ticker": ticker,
-            "name": df["name"].iloc[0],
-            "market": df["market"].iloc[0],
-            "source": "本地追踪数据库",
-            "start_price": round(float(start_price), 2),
-            "end_price": round(float(end_price), 2),
-            "total_return_pct": round(float((end_price - start_price) / start_price * 100), 2),
-            "volatility": round(float(df["daily_return_pct"].std()), 2),
-        }
+    if df.empty:
+        return None
 
-    # ---- 第二步：本地没有，实时联网查询最近90天 ----
+    df = df.sort_values("date")
+    df["daily_return_pct"] = df["close"].pct_change() * 100
+    start_price = df["close"].iloc[0]
+    end_price = df["close"].iloc[-1]
+
+    return {
+        "ticker": ticker,
+        "name": df["name"].iloc[0],
+        "market": df["market"].iloc[0],
+        "source": f"⚠️本地缓存旧数据（{df['date'].iloc[0]}至{df['date'].iloc[-1]}，实时查询失败时的备用数据，可能不是最新）",
+        "start_price": round(float(start_price), 2),
+        "end_price": round(float(end_price), 2),
+        "total_return_pct": round(float((end_price - start_price) / start_price * 100), 2),
+        "volatility": round(float(df["daily_return_pct"].std()), 2),
+    }
+
+
+def get_stock_summary(ticker: str) -> dict:
+    ticker = ticker.strip()
     try:
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=90)
-
-        if ticker.isdigit() and len(ticker) == 6:
-            prefix = "sh" if ticker.startswith("6") else "sz"
-            live_df = ak.stock_zh_a_daily(symbol=f"{prefix}{ticker}", adjust="")
-            market = "A股"
-        else:
-            hk_code = ticker.zfill(5)
-            live_df = ak.stock_hk_daily(symbol=hk_code, adjust="")
-            market = "港股"
-
-        live_df["date"] = live_df["date"].astype(str)
-        live_df = live_df[
-            (live_df["date"] >= start_date.strftime("%Y-%m-%d"))
-            & (live_df["date"] <= end_date.strftime("%Y-%m-%d"))
-        ]
-
-        if live_df.empty:
-            return {"error": f"没有找到股票代码 {ticker} 最近的数据，请确认代码是否正确"}
-
-        live_df["daily_return_pct"] = live_df["close"].pct_change() * 100
-        start_price = live_df["close"].iloc[0]
-        end_price = live_df["close"].iloc[-1]
-
-        return {
-            "ticker": ticker,
-            "market": market,
-            "source": "实时查询（最近90天）",
-            "start_price": round(float(start_price), 2),
-            "end_price": round(float(end_price), 2),
-            "total_return_pct": round(float((end_price - start_price) / start_price * 100), 2),
-            "volatility": round(float(live_df["daily_return_pct"].std()), 2),
-        }
-    except Exception as e:
-        return {"error": f"查询股票代码 {ticker} 时出错：{e}（提示：目前只支持A股和港股，不支持美股）"}
+        return _fetch_live(ticker)
+    except Exception as live_error:
+        fallback = _fetch_from_local_db(ticker)
+        if fallback is not None:
+            return fallback
+        return {"error": f"实时查询失败且本地也没有缓存数据：{live_error}（提示：目前只支持A股和港股，不支持美股）"}
 
 
 def list_watchlist() -> list:
@@ -91,7 +93,7 @@ def list_watchlist() -> list:
         conn.close()
         return df.to_dict(orient="records")
     except Exception:
-        return []  # 本地数据库不存在时返回空列表，而不是崩溃
+        return []
 
 
 tool_functions = {
@@ -103,8 +105,8 @@ tools = [
     {
         "name": "get_stock_summary",
         "description": (
-            "查询任意一支A股或港股的整体表现（期初价、期末价、总收益率、波动率）。"
-            "支持系统长期追踪的股票，也支持其他任意A股/港股代码（会自动实时联网查询最近90天数据）。"
+            "查询任意一支A股或港股最近90天的整体表现（期初价、期末价、总收益率、波动率），"
+            "永远优先实时联网查询，只有联网失败时才使用本地缓存的旧数据兜底（结果中会明确标注）。"
             "不支持美股。"
         ),
         "input_schema": {
@@ -117,7 +119,7 @@ tools = [
     },
     {
         "name": "list_watchlist",
-        "description": "列出系统长期追踪的核心股票清单（代码、名称、市场）。注意：这不代表能查询的全部范围，get_stock_summary可以查询任意A股/港股。",
+        "description": "列出本地有缓存数据的股票（仅在实时查询失败时作为兜底参考，不代表能查询的全部范围）。",
         "input_schema": {"type": "object", "properties": {}},
     },
 ]
@@ -157,11 +159,9 @@ def ask_agent(client, messages):
         messages.append({"role": "user", "content": tool_results})
 
 
-# ========== 网页界面 ==========
-
 st.set_page_config(page_title="FinSight Agent", page_icon="📈")
 st.title("📈 FinSight — AI 金融数据分析 Agent")
-st.caption("任意A股/港股 · pandas 分析 · 基于 Claude function calling")
+st.caption("任意A股/港股 · 实时优先，联网失败自动降级 · 基于 Claude function calling")
 
 client = Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
 
@@ -174,7 +174,7 @@ for role, text in st.session_state.display_messages:
     with st.chat_message(role):
         st.markdown(text)
 
-user_input = st.chat_input("问问关于A股/港股的问题，比如“泡泡玛特这段时间表现怎么样”")
+user_input = st.chat_input("问问关于A股/港股的问题，比如“腾讯最近表现怎么样”")
 
 if user_input:
     st.session_state.display_messages.append(("user", user_input))
